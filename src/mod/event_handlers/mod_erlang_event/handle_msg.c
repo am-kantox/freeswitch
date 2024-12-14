@@ -1202,7 +1202,10 @@ static switch_status_t handle_msg_atom(listener_t *listener, erlang_msg * msg, e
 
 static switch_status_t handle_ref_tuple(listener_t *listener, erlang_msg * msg, ei_x_buff * buf, ei_x_buff * rbuf)
 {
-	erlang_ref ref;
+	/* make ref opaque */
+	/* erlang_ref ref; */
+	int ref_start, ref_len = 0;
+	char *ref = NULL;
 	erlang_pid pid;
 	char hash[100];
 	int arity;
@@ -1214,10 +1217,15 @@ static switch_status_t handle_ref_tuple(listener_t *listener, erlang_msg * msg, 
 
 	ei_decode_tuple_header(buf->buff, &buf->index, &arity);
 
-	if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
+	ref_start = buf->index;
+	if (ei_skip_term(buf->buff, &buf->index)) { /* skip the opaque tag/ref */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid reference\n");
 		return SWITCH_STATUS_FALSE;
 	}
+	ref_len = buf->index - ref_start;
+
+	switch_malloc(ref, ref_len);
+	memcpy(ref, &buf->buff[ref_start], ref_len);
 
 	if (ei_decode_pid(buf->buff, &buf->index, &pid)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid pid in a reference/pid tuple\n");
@@ -1252,6 +1260,7 @@ static switch_status_t handle_ref_tuple(listener_t *listener, erlang_msg * msg, 
 		}
 	}
 	switch_safe_free(iter);
+	switch_safe_free(ref);
 	switch_thread_rwlock_unlock(listener->session_rwlock);
 
 	if (found) {
@@ -1272,7 +1281,10 @@ static switch_status_t handle_net_kernel_msg(listener_t *listener, erlang_msg * 
 {
 	int version, size, type, arity;
 	char atom[MAXATOMLEN];
-	erlang_ref ref;
+	/* make ref opaque */
+	/* erlang_ref ref; */
+	int ref_start, ref_len = 0;
+	char *ref = NULL;
 	erlang_pid pid;
 
 	buf->index = 0;
@@ -1310,8 +1322,18 @@ static switch_status_t handle_net_kernel_msg(listener_t *listener, erlang_msg * 
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (ei_decode_pid(buf->buff, &buf->index, &pid) || ei_decode_ref(buf->buff, &buf->index, &ref)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "decoding pid and ref error\n");
+	if (!ei_decode_pid(buf->buff, &buf->index, &send_msg->pid)) {
+		ref_start = buf->index;
+		if (ei_skip_term(buf->buff, &buf->index)) { /* skip the opaque tag/ref */
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref/tag of the net_kernel tuple second element\n");
+			return SWITCH_STATUS_FALSE;
+		}
+		ref_len = buf->index - ref_start;
+
+		switch_malloc(ref, ref_len);
+		memcpy(ref, &buf->buff[ref_start], ref_len);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang pid of the net_kernel tuple second element\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -1336,8 +1358,10 @@ static switch_status_t handle_net_kernel_msg(listener_t *listener, erlang_msg * 
 
 	/* To ! {Tag, Reply} */
 	ei_x_encode_tuple_header(rbuf, 2);
-	ei_x_encode_ref(rbuf, &ref);
+	ei_x_append_buf(&send_msg->buf, ref, ref_len);
 	ei_x_encode_atom(rbuf, "yes");
+
+	switch_safe_free(ref);
 
 	switch_mutex_lock(listener->sock_mutex);
 	ei_send(listener->sockdes, &pid, rbuf->buff, rbuf->index);
